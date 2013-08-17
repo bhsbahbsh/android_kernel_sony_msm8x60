@@ -3554,6 +3554,7 @@ end:
 
 int mdp4_overlay_commit(struct fb_info *info)
 {
+	int mixer;
 	int ret = 0;
 	struct msm_fb_data_type *mfd = (struct msm_fb_data_type *)info->par;
 
@@ -3563,9 +3564,16 @@ int mdp4_overlay_commit(struct fb_info *info)
 	if (!mfd->panel_power_on) /* suspended */
 		return -EINVAL;
 
+	mixer = mfd->panel_info.pdest;  /* DISPLAY_1 or DISPLAY_2 */
+
+	if (mixer >= MDP4_MIXER_MAX)
+	  return -EPERM;
+
 	mutex_lock(&mfd->dma->ov_mutex);
 
 	mdp4_overlay_mdp_perf_upd(mfd, 1);
+
+	msm_fb_wait_for_fence(mfd);
 
 	switch (mfd->panel.type) {
 	case MIPI_CMD_PANEL:
