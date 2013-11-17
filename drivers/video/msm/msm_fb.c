@@ -357,14 +357,20 @@ static int msm_fb_probe(struct platform_device *pdev)
 
 	if ((pdev->id == 0) && (pdev->num_resources > 0)) {
 		msm_fb_pdata = pdev->dev.platform_data;
-		fbram_size =
-			pdev->resource[0].end - pdev->resource[0].start + 1;
-		fbram_phys = (char *)pdev->resource[0].start;
-		fbram = __va(fbram_phys);
+		if (pdev->resource[0].start) {
+			fbram_size =
+				pdev->resource[0].end - pdev->resource[0].start + 1;
+			fbram_phys = (char *)pdev->resource[0].start;
+			fbram = __va(fbram_phys);
 
-		if (!fbram) {
-			printk(KERN_ERR "fbram ioremap failed!\n");
-			return -ENOMEM;
+			if (!fbram) {
+				printk(KERN_ERR "fbram ioremap failed!\n");
+				return -ENOMEM;
+			}
+		} else {
+			fbram_size = 0;
+			fbram_phys = NULL;
+			fbram = NULL;
 		}
 		MSM_FB_DEBUG("msm_fb_probe:  phy_Addr = 0x%x virt = 0x%x\n",
 			     (int)fbram_phys, (int)fbram);
@@ -812,13 +818,16 @@ static void msmfb_early_suspend(struct early_suspend *h)
 	struct fb_info *fbi = mfd->fbi;
 	switch (mfd->fbi->var.bits_per_pixel) {
 	case 32:
-		memset32_io((void *)fbi->screen_base, 0xFF000000,
-							fbi->fix.smem_len);
-		break;
-	default:
-		memset32_io((void *)fbi->screen_base, 0x00, fbi->fix.smem_len);
-		break;
-	}
+                if (fbi->screen_base)
+                        memset32_io((void *)fbi->screen_base, 0xFF000000,
+                                    fbi->fix.smem_len);
+                break;
+        default:
+                if (fbi->screen_base)
+                        memset32_io((void *)fbi->screen_base, 0x00,
+                                    fbi->fix.smem_len);
+                break;
+        }
 #endif
 	msm_fb_suspend_sub(mfd);
 
@@ -1221,6 +1230,9 @@ static int msm_fb_register(struct msm_fb_data_type *mfd)
 	int *id;
 	int fbram_offset;
 	int remainder, remainder_mode2;
+	static int subsys_id[2] = {MSM_SUBSYSTEM_DISPLAY,
+		MSM_SUBSYSTEM_ROTATOR};
+	unsigned int flags = MSM_SUBSYSTEM_MAP_IOVA;
 
 	/*
 	 * fb info initialization
@@ -1487,12 +1499,15 @@ static int msm_fb_register(struct msm_fb_data_type *mfd)
 		pr_err("error: not enough memory!\n");
 		return -ENOMEM;
 	}
-	fbram_offset = PAGE_ALIGN((int)fbram)-(int)fbram;
-	fbram += fbram_offset;
-	fbram_phys += fbram_offset;
-	fbram_size -= fbram_offset;
+	if (fbram) {
+		fbram_offset = PAGE_ALIGN((int)fbram)-(int)fbram;
+		fbram += fbram_offset;
+		fbram_phys += fbram_offset;
+		fbram_size -= fbram_offset;
+	} else
+		fbram_offset = 0;
 
-	if (!bf_supported || mfd->index == 0)
+	if ((!bf_supported || mfd->index == 0) && fbram)
 		if (fbram_size < fix->smem_len) {
 			pr_err("error: no more framebuffer memory!\n");
 			return -ENOMEM;
@@ -1501,45 +1516,19 @@ static int msm_fb_register(struct msm_fb_data_type *mfd)
 	fbi->screen_base = fbram;
 	fbi->fix.smem_start = (unsigned long)fbram_phys;
 
-/* jb_mr1_chocolate
-	mfd->map_buffer = msm_subsystem_map_buffer(
-		fbi->fix.smem_start, fbi->fix.smem_len,
-		flags, subsys_id, 2);
-	if (mfd->map_buffer) {
-		pr_debug("%s(): buf 0x%lx, mfd->map_buffer->iova[0] 0x%lx\n"
-			"mfd->map_buffer->iova[1] 0x%lx", __func__,
-			fbi->fix.smem_start, mfd->map_buffer->iova[0],
-			mfd->map_buffer->iova[1]);
-	}
-*/
+	if (fbi->fix.smem_start) {
+                mfd->map_buffer = msm_subsystem_map_buffer(
+                        fbi->fix.smem_start, fbi->fix.smem_len,
+                        flags, subsys_id, 2);
+                if (mfd->map_buffer) {
+                        pr_debug("%s(): buf 0x%lx, mfd->map_buffer->iova[0] 0x%lx\n"
+                                "mfd->map_buffer->iova[1] 0x%lx", __func__,
+                                fbi->fix.smem_start, mfd->map_buffer->iova[0],
+                                mfd->map_buffer->iova[1]);
+                }
+        }
 
-/* FIXME: check if write domain needs to be mapped
-	msm_iommu_map_contig_buffer(fbi->fix.smem_start,
-					DISPLAY_WRITE_DOMAIN,
-					GEN_POOL,
-					fbi->fix.smem_len,
-					SZ_4K,
-					0,
-					&(mfd->display_iova));
-*/
-
-	msm_iommu_map_contig_buffer(fbi->fix.smem_start,
-					DISPLAY_READ_DOMAIN,
-					GEN_POOL,
-					fbi->fix.smem_len,
-					SZ_4K,
-					0,
-					&(mfd->display_iova));
-
-	msm_iommu_map_contig_buffer(fbi->fix.smem_start,
-					ROTATOR_SRC_DOMAIN,
-					GEN_POOL,
-					fbi->fix.smem_len,
-					SZ_4K,
-					0,
-					&(mfd->rotator_iova));
-
-	if (!bf_supported || mfd->index == 0)
+	if ((!bf_supported || mfd->index == 0) && fbi->screen_base)
 		memset(fbi->screen_base, 0x0, fix->smem_len);
 
 	mfd->op_enable = TRUE;
@@ -1547,21 +1536,10 @@ static int msm_fb_register(struct msm_fb_data_type *mfd)
 
 	/* cursor memory allocation */
 	if (mfd->cursor_update) {
-		unsigned long cursor_buf_iommu = 0;
 		mfd->cursor_buf = dma_alloc_coherent(NULL,
 					MDP_CURSOR_SIZE,
 					(dma_addr_t *) &mfd->cursor_buf_phys,
 					GFP_KERNEL);
-
-		msm_iommu_map_contig_buffer((unsigned long)mfd->cursor_buf_phys,
-					    DISPLAY_READ_DOMAIN,
-					    GEN_POOL,
-					    MDP_CURSOR_SIZE,
-					    SZ_4K,
-					    0,
-					    &cursor_buf_iommu);
-		if (cursor_buf_iommu)
-			mfd->cursor_buf_phys = (void *)cursor_buf_iommu;
 
 		if (!mfd->cursor_buf)
 			mfd->cursor_update = 0;
@@ -1588,9 +1566,11 @@ static int msm_fb_register(struct msm_fb_data_type *mfd)
 		return -EPERM;
 	}
 
-	fbram += fix->smem_len;
-	fbram_phys += fix->smem_len;
-	fbram_size -= fix->smem_len;
+	if (fbram) {
+		fbram += fix->smem_len;
+		fbram_phys += fix->smem_len;
+		fbram_size -= fix->smem_len;
+	}
 
 	MSM_FB_INFO
 	    ("FrameBuffer[%d] %dx%d size=%d bytes is registered successfully!\n",
@@ -4302,41 +4282,32 @@ struct platform_device *msm_fb_add_device(struct platform_device *pdev)
 EXPORT_SYMBOL(msm_fb_add_device);
 
 int get_fb_phys_info(unsigned long *start, unsigned long *len, int fb_num,
-	int subsys_id)
+        int subsys_id)
 {
-	struct fb_info *info;
-	struct msm_fb_data_type *mfd;
+        struct fb_info *info;
+        struct msm_fb_data_type *mfd;
 
-	if (fb_num > MAX_FBI_LIST ||
-		(subsys_id != DISPLAY_SUBSYSTEM_ID &&
-		 subsys_id != ROTATOR_SUBSYSTEM_ID)) {
-		pr_err("%s(): Invalid parameters\n", __func__);
-		return -1;
-	}
+        if (fb_num > MAX_FBI_LIST ||
+                (subsys_id != DISPLAY_SUBSYSTEM_ID &&
+                 subsys_id != ROTATOR_SUBSYSTEM_ID)) {
+                pr_err("%s(): Invalid parameters\n", __func__);
+                return -1;
+        }
 
-	info = fbi_list[fb_num];
-	if (!info) {
-		pr_err("%s(): info is NULL\n", __func__);
-		return -1;
-	}
+        info = fbi_list[fb_num];
+        if (!info) {
+                pr_err("%s(): info is NULL\n", __func__);
+                return -1;
+        }
 
-	mfd = (struct msm_fb_data_type *)info->par;
-	
-	if (subsys_id == DISPLAY_SUBSYSTEM_ID) {
-		if (mfd->display_iova)
-			*start = mfd->display_iova;
-		else
-			*start = info->fix.smem_start;
-	} else {
-		if (mfd->rotator_iova)
-			*start = mfd->rotator_iova;
-		else
-			*start = info->fix.smem_start;
-	}
+        mfd = (struct msm_fb_data_type *)info->par;
+        if (mfd->map_buffer)
+                *start = mfd->map_buffer->iova[subsys_id];
+        else
+                *start = info->fix.smem_start;
+        *len = info->fix.smem_len;
 
-	*len = info->fix.smem_len;
-
-	return 0;
+        return 0;
 }
 EXPORT_SYMBOL(get_fb_phys_info);
 
