@@ -11,6 +11,8 @@
  *
  */
 
+#include <linux/module.h>
+
 #include <media/msm/vidc_type.h>
 #include "vcd.h"
 
